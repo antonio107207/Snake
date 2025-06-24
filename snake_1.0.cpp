@@ -1,297 +1,180 @@
-#include <stdlib.h>
-#include <stdio.h>
-#include <conio.h>
+/*───────────────────────────────────────────────────────────────
+ *  SNAKE – ncurses (Ubuntu‑compatible)  
+ *  v9 – compile‑clean: fixes missing functions, prototype warnings,  
+ *       and misleading‑indentation (June 2025)  
+ *
+ *  • Added prototypes + definitions for `head_out()` and `tail_out()`  
+ *  • Wrapped the `if (out_you_win())` + `refresh()` statement in braces  
+ *    to silence `‑Wmisleading‑indentation`.  
+ *  • Verified all functions declared before use (no implicit warnings).  
+ *  • Build clean: `gcc snake.c -std=c99 -Wall -O2 -lncurses -o snake`  
+ *──────────────────────────────────────────────────────────────*/
+
+#define _XOPEN_SOURCE 700
+#include <ncurses.h>
 #include <time.h>
-#include <windows.h>
- 
-#define left 75
-#define right 77
-#define up 72
-#define down 80
+#include <stdlib.h>
+#include <unistd.h>
+#include <stdbool.h>
+#include <string.h>
 
-typedef struct{
-	int score;
-	int speed;
-}gameParam;
+/*── Board geometry ───────────────────────────────────────────*/
+#define BOARD_W  36
+#define BOARD_H  20
+#define PLAY_MIN_X 1
+#define PLAY_MAX_X (BOARD_W - 2)
+#define PLAY_MIN_Y 1
+#define PLAY_MAX_Y (BOARD_H - 2)
 
-typedef struct{
-	int x;
-	int y;	
-}headPosition;
+/*── Keys */
+#define left   KEY_LEFT
+#define right  KEY_RIGHT
+#define up     KEY_UP
+#define down   KEY_DOWN
 
-typedef struct{
-	int x;
-	int y;
-}tailPosition;
+/*── Types */
+typedef struct { int X, Y; } COORD;
+typedef struct { int score, speed, level; } gameParam;
+typedef struct { int x, y; } pos;
 
-void set_console_size_title();
-void hide_cursor();
-void out_title_screen();
-void out_game_info(gameParam take);
-void head_out(COORD head);
-void tail_out(COORD tail);
-int out_you_win(gameParam take);
-int out_game_over();
-int set_food(char map[][19]);
-int exit_game();
-int hit_button(int &key);
-int set_marker(char map[][19], int key, COORD head);
-COORD get_marker(char map[][19], COORD &tail);
-gameParam set_game_par();
-gameParam set_new_game_param(gameParam &set_par);
-headPosition lock_current_pos_head(COORD &head);
-tailPosition lock_current_pos_tail(COORD &tail);
-headPosition move_head(int &key, headPosition &set_pos);
- 
-int main(){
-	
-    srand(time(0));
-	int x=19, y=18;													//start position
-	int key;														//variable for button
-				
-	char map[34][19]={};											//array for marking snake position (move direction, food position)
-	
-	COORD head={x, y};												//snake's head('*')
-	COORD tail={x, y};												//snake's tail(' ')
-		
-	gameParam set_par;	
-		
-	headPosition chp;												//current head position
-	tailPosition ctp;												//current tail position										
-	set_par=set_game_par();											//start parameters
-	hide_cursor();
-    set_console_size_title();
-//--------------------------------------------------------------------------------------
-//title screen
-//--------------------------------------------------------------------------------------    
-    out_title_screen();
-//--------------------------------------------------------------------------------------
-//gameplay
-//--------------------------------------------------------------------------------------    
-	set_food(map);													//set first item on the game-field
-	do{
-		out_game_info(set_par);										//game-info out
-		head_out(head);												//snake head out
-		chp=lock_current_pos_head(head);	
-    	hit_button(key);											//hit the button to start move
-    	Sleep(set_par.speed);										//set delay for snake's speed emitation
-   	 	move_head(key, chp);									
-    
-    	if(map[chp.y-1][chp.x-1]==0 || map[chp.y-1][chp.x-1]=='i'){ //check map
-			map[head.Y][head.X]=set_marker(map, key, head);		    //on head position set marker
-			head.X=chp.x; 											
-			head.Y=chp.y;											
-			if(key==left || key==right || key==up || key==down){ 	//check button 
-				if(map[head.Y-1][head.X-1]!='i'){					//check marker
-			 		tail_out(tail); 								
-					ctp=lock_current_pos_tail(tail);
-					tail=get_marker(map, tail);						//get marker to move tail
-					map[ctp.y-1][ctp.x-1]=0;						//clean marker
-				}
-				else{
-					set_food(map);
-					set_new_game_param(set_par);
-				}
-				head_out(head);
-    		}
-    	}
-    	else {
-    		out_game_over();
-			return 0;  
-		}
-	out_you_win(set_par);
-	}
-	while(key!=27);                                             
-	exit_game();
+/*── Forward declarations */
+static void  init_ncurses(void);
+static void  shutdown_ncurses(void);
+static void  draw_border(void);
+static void  splash_title(void);
+static WINDOW* show_overlay(const char *txt, int millis);
+static void  splash_level(int lvl);
+static void  pause_game(void);
+static void  out_game_info(const gameParam *gp);
+static void  head_out(COORD h);
+static void  tail_out(COORD t);
+static int   out_you_win(const gameParam *gp);
+static int   out_game_over(void);
+static int   set_food(char map[BOARD_H][BOARD_W]);
+static void  inc_score_speed(gameParam *gp);
+static int   maybe_level_up(gameParam *gp);
+static void  set_marker(char map[BOARD_H][BOARD_W], int key, COORD h);
+static COORD get_marker(char map[BOARD_H][BOARD_W], COORD *t);
+static pos   move_head(int key, pos p);
+
+/*── ncurses init/teardown */
+static void init_ncurses(void){ initscr(); keypad(stdscr,TRUE); noecho(); curs_set(0); start_color(); use_default_colors(); }
+static void shutdown_ncurses(void){ curs_set(1); endwin(); }
+
+/*── Border */
+static void draw_border(void){
+    mvaddch(0,0,ACS_ULCORNER); mvaddch(0,BOARD_W-1,ACS_URCORNER);
+    mvaddch(BOARD_H-1,0,ACS_LLCORNER); mvaddch(BOARD_H-1,BOARD_W-1,ACS_LRCORNER);
+    mvhline(0,1,ACS_HLINE,BOARD_W-2); mvhline(BOARD_H-1,1,ACS_HLINE,BOARD_W-2);
+    mvvline(1,0,ACS_VLINE,BOARD_H-2); mvvline(1,BOARD_W-1,ACS_VLINE,BOARD_H-2);
 }
-//-----------------------------------------------------------------------------------------------
-void set_console_size_title(){
-	HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-	SetConsoleTitle("SNAKE v1.0");							
-	system("mode con lines=23 cols=35");					
+
+/*── Title */
+static void splash_title(void){
+    const char *m1="SNAKE!", *m2="press any key to start…", *m3="arrow keys | Esc quits | space pauses";
+    while(true){ clear(); draw_border();
+        mvprintw(5,(BOARD_W-(int)strlen(m1))/2,"%s",m1);
+        mvprintw(7,(BOARD_W-(int)strlen(m2))/2,"%s",m2);
+        mvprintw(9,(BOARD_W-(int)strlen(m3))/2,"%s",m3);
+        refresh(); if(getch()!=ERR){ beep(); break; } napms(100); }
 }
-//-----------------------------------------------------------------------------------------------
-void hide_cursor(){
-	CONSOLE_CURSOR_INFO CCI;								
-    CCI.bVisible=false;
-    CCI.dwSize=1;
-    SetConsoleCursorInfo(GetStdHandle(STD_OUTPUT_HANDLE),&CCI);
+
+/*── Overlay helper */
+static WINDOW* show_overlay(const char *txt, int millis){
+    int len=strlen(txt), h=3, w=len+4;
+    int y=BOARD_H/2-h/2, x=(BOARD_W-w)/2;
+    WINDOW *win=newwin(h,w,y,x);
+    box(win,0,0); mvwprintw(win,1,2,"%s",txt); wrefresh(win); beep();
+    if(millis>0){ napms(millis); delwin(win); touchwin(stdscr); refresh(); return NULL; }
+    return win;
 }
-//-----------------------------------------------------------------------------------------------
-gameParam set_game_par(){
-	gameParam set;
-	set.score=0;
-	set.speed=250;
-	return set;
+
+static void splash_level(int lvl){ char buf[24]; snprintf(buf,sizeof buf,"LEVEL %d",lvl); show_overlay(buf,3000); }
+
+/*── Pause */
+static void pause_game(void){
+    WINDOW *w=show_overlay("PAUSED",0);
+    int ch; while((ch=getch())!=' ' && ch!=27) napms(50);
+    if(ch==27) ungetch(ch);
+    delwin(w); touchwin(stdscr); refresh();
 }
-//-----------------------------------------------------------------------------------------------
-void out_title_screen(){
-	do{
-		printf("              SNAKE!              \n      press any key to start...\n  to control snake use arrows keys\n        to quit press 'Esc'");
-		Sleep(1000);
-		system("cls");
-	}
-	while(!kbhit());
+
+/*── UI helpers */
+static void out_game_info(const gameParam *gp){ mvprintw(BOARD_H,0,"SCORE:%d LEVEL:%d (space=pause)",gp->score,gp->level); clrtoeol(); }
+static void head_out(COORD h){ mvaddch(h.Y,h.X,'*'); }
+static void tail_out(COORD t){ mvaddch(t.Y,t.X,' '); }
+
+/*── End‑game overlays */
+static int out_you_win(const gameParam *gp){
+    if(gp->score<50) return 0;
+    flushinp(); WINDOW *w=show_overlay("YOU WIN!",0); beep();
+    timeout(-1); getch();
+    delwin(w); touchwin(stdscr); refresh();
+    return 1;
 }
-//------------------------------------------------------------------------------------------------
-void out_game_info(gameParam take){
-	COORD info={0, 19};
-	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), info);
-	printf("----------------------------------\nSCORE: %i\n", take.score);
+
+static int out_game_over(void){
+    /* Return 1 so the caller can decide to restart */
+    flushinp(); WINDOW *w=show_overlay("GAME OVER!",0);
+    timeout(-1); getch();
+    delwin(w); touchwin(stdscr); refresh();
+    return 1; /* signal game-over */
 }
-//------------------------------------------------------------------------------------------------
-void head_out(COORD head){
-	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), head);
-	printf("*");
+
+/*── Gameplay helpers */
+static int set_food(char map[BOARD_H][BOARD_W]){
+    COORD f;
+    do{ f.X=rand()%(PLAY_MAX_X-1)+1; f.Y=rand()%(PLAY_MAX_Y-1)+1; }while(map[f.Y][f.X]);
+    mvaddch(f.Y,f.X,'o'); map[f.Y][f.X]='i'; return 0;
 }
-//------------------------------------------------------------------------------------------------
-void tail_out(COORD tail){
-	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), tail);
-	printf(" ");	
-}
-//------------------------------------------------------------------------------------------------
-int out_you_win(gameParam take){
-	if(take.score==50){
-		COORD message={13, 10};
-		SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), message);
-		printf("YOU WIN!\n    THANK YOU FOR PLAYNING!");
-		getch();
-		return 0;
-	}
-}
-//-------------------------------------------------------------------------------------------------
-int out_game_over(){
-	COORD message={13, 10};
-	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), message);
-	printf("GAME OVER!");
-	getch();
-	return 0;
-}
-//-------------------------------------------------------------------------------------------------
-int set_food(char map[][19]){
-	COORD food={rand()% 33+1, rand()% 18+1};
-	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), food);
-    printf("o");
-    return map[food.Y-1][food.X-1]='i';
-}
-//-------------------------------------------------------------------------------------------------
-gameParam set_new_game_param(gameParam &set_par){
-	set_par.score++;
-	set_par.speed-=5;
-	return set_par;	
-}
-//-------------------------------------------------------------------------------------------------
-int exit_game(){
-	COORD message={13, 10};
-	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), message);
-	printf("GOODBYE!"); 
-getch();
-}
-//---------------------------------------------------------------------------------------------------
-int hit_button(int &key){
-	if(kbhit()){ 
-		key=getch(); 
-		if(key==224){
-			key=getch();
-		}
-	}
-	return key;
-}
-//---------------------------------------------------------------------------------------------------
-headPosition move_head(int &key, headPosition &set_pos){
-	    switch (key){
-       	 case left:
-        	if(set_pos.x>0){
-		    	set_pos.x--;
+static gameParam new_gamepar(void){ return (gameParam){0,250,1}; }
+static void inc_score_speed(gameParam *gp){ ++gp->score; if(gp->speed>60) gp->speed-=5; }
+static int maybe_level_up(gameParam *gp){ int lvl=gp->score/5+1; if(lvl>gp->level){ gp->level=lvl; return 1;} return 0; }
+static void set_marker(char map[BOARD_H][BOARD_W], int key, COORD h){ map[h.Y][h.X]=(key==left?'l':key==right?'r':key==up?'u':'d'); }
+static COORD get_marker(char map[BOARD_H][BOARD_W], COORD *t){ switch(map[t->Y][t->X]){ case 'l': if(t->X>PLAY_MIN_X)--t->X; break; case 'r': if(t->X<PLAY_MAX_X)++t->X; break; case 'u': if(t->Y>PLAY_MIN_Y)--t->Y; break; case 'd': if(t->Y<PLAY_MAX_Y)++t->Y; break;} return *t; }
+static pos move_head(int key, pos p){ switch(key){ case left: if(p.x>PLAY_MIN_X)--p.x; break; case right: if(p.x<PLAY_MAX_X)++p.x; break; case up: if(p.y>PLAY_MIN_Y)--p.y; break; case down: if(p.y<PLAY_MAX_Y)++p.y; break;} return p; }
+
+/*── main */
+int main(void){
+    srand((unsigned)time(NULL)); init_ncurses();
+
+    while(true){
+        /* ── fresh game state ───────────────────────────── */
+        static char map[BOARD_H][BOARD_W];
+        memset(map, 0, sizeof map);
+        COORD head={BOARD_W/2,BOARD_H/2}, tail=head;
+        int key=right; gameParam gp=new_gamepar();
+
+        splash_title(); clear(); draw_border(); set_food(map); out_game_info(&gp); refresh();
+
+        bool lost=false, quit=false, won=false;
+        while(!lost && !quit && !won){
+            timeout(gp.speed);
+            int ch=getch();
+            if(ch==' '){ pause_game(); out_game_info(&gp); draw_border(); refresh(); continue; }
+            if(ch!=ERR) key=ch;
+            if(key==27){ quit=true; break; }
+
+            pos hp=move_head(key,(pos){head.X,head.Y});
+            if(!map[hp.y][hp.x] || map[hp.y][hp.x]=='i'){
+                set_marker(map,key,head); head.X=hp.x; head.Y=hp.y;
+                if(map[head.Y][head.X]!='i'){
+                    tail_out(tail); COORD old=tail; tail=get_marker(map,&tail); map[old.Y][old.X]=0;
+                }else{
+                    beep(); set_food(map); inc_score_speed(&gp);
+                    if(maybe_level_up(&gp)) splash_level(gp.level);
+                }
+                out_game_info(&gp); head_out(head);
+            }else{
+                lost = out_game_over();
+                break;
             }
-        	else{
-        		out_game_over();
-        	}
-        break;
-        case right:
-        	if(set_pos.x<35){
-		    	set_pos.x++;
-            }
-        	else{
-        		out_game_over();
-        		}
-        break;
-        case up:
-    		if(set_pos.y>0){
-		    	set_pos.y--;
-           	}
-        	else{
-        		out_game_over();
-        	}
-        break;
-        case down:
-    		if(set_pos.y<19){
-		    	set_pos.y++;
-           	}
-        	else{
-        		out_game_over();
-        	}
-        break;
+            if(out_you_win(&gp)){ won=true; break; }
+            refresh();
+        }
+        if(quit || won) break; /* exit outer loop */
+        /* Otherwise 'lost' is true -> restart (title screen will show again) */
     }
-return set_pos;
-}
-//---------------------------------------------------------------------------------------------------
-headPosition lock_current_pos_head(COORD &head){
-	headPosition chp;
-	chp.x=head.X;
-	chp.y=head.Y;
-	return chp;
-}
-//----------------------------------------------------------------------------------------------------
-int set_marker(char map[][19], int key, COORD head){
-	switch(key){ 
-			case left:
-				map[head.Y-1][head.X-1]='l';
-			break;	
-			case right:
-				map[head.Y-1][head.X-1]='r';
-			break;	
-			case up:
-				map[head.Y-1][head.X-1]='u'; 
-			break;	
-			case down:
-				map[head.Y-1][head.X-1]='d';
-			break;	
-		}
-	return map[head.Y][head.X];
-}
-//----------------------------------------------------------------------------------------------------
-tailPosition lock_current_pos_tail(COORD &tail){
-	tailPosition ctp;
-	ctp.x=tail.X;
-	ctp.y=tail.Y;
-	return ctp;	
-}
-//----------------------------------------------------------------------------------------------------
-COORD get_marker(char map[][19], COORD &tail){
-	switch(map[tail.Y-1][tail.X-1]){ 
-		case 'l':
-			if(tail.X>0){
-				tail.X--;
-			}
-		break;
-		case 'r':
-			if(tail.X<35){
-				tail.X++;
-			}
-		break;
-		case 'u':
-			if(tail.Y>0){
-				tail.Y--;
-			}
-		break;
-		case 'd':
-			if(tail.Y<19){
-				tail.Y++;
-			}
-		break;
-	}
-return tail;
-}
-//-----------------------------------------------------------------------------------------------------
 
+    shutdown_ncurses(); return 0;
+}
